@@ -1,126 +1,172 @@
-const express = require("express");
-const http = require("http");
-const mineflayer = require('mineflayer')
-const pvp = require('mineflayer-pvp').plugin
-const { pathfinder, Movements, goals} = require('mineflayer-pathfinder')
-const armorManager = require('mineflayer-armor-manager')
-const mc = require('minecraft-protocol');
-const AutoAuth = require('mineflayer-auto-auth');
+const mineflayer = require('mineflayer');
+const Movements = require('mineflayer-pathfinder').Movements;
+const pathfinder = require('mineflayer-pathfinder').pathfinder;
+const { GoalBlock } = require('mineflayer-pathfinder').goals;
+
+const config = require('./settings.json');
+const express = require('express');
+
 const app = express();
 
+app.get('/', (req, res) => {
+  res.send('Bot has arrived');
+});
 
-app.use(express.json());
+app.listen(8000, () => {
+  console.log('Server started');
+});
 
-app.get("/", (_, res) => res.sendFile(__dirname + "/index.html"));
-app.listen(process.env.PORT);
+function createBot() {
+   const bot = mineflayer.createBot({
+      username: config['bot-account']['username'],
+      password: config['bot-account']['password'],
+      auth: config['bot-account']['type'],
+      host: config.server.ip,
+      port: config.server.port,
+      version: config.server.version,
+   });
 
-setInterval(() => {
-  http.get(`http://${process.env.PROJECT_DOMAIN}.repl.co/`);
-}, 224000);
+   bot.loadPlugin(pathfinder);
+   const mcData = require('minecraft-data')(bot.version);
+   const defaultMove = new Movements(bot, mcData);
+   bot.settings.colorsEnabled = false;
 
+   let pendingPromise = Promise.resolve();
 
-// U CAN ONLY EDIT THIS SECTION!!
-function createBot () {
-const bot = mineflayer.createBot({
-  host: 'Gaangsters.aternos.me', 
-  version: false, // U can replace with 1.20 for example, remember to use ', = '1.20.1'
-  username: 'AFK', 
-  port: 21433,
-  
-  plugins: [AutoAuth],
-  AutoAuth: 'bot112024'
-})
-/// DONT TOUCH ANYTHING MORE!
-bot.loadPlugin(pvp)
-bot.loadPlugin(armorManager)
-bot.loadPlugin(pathfinder)
+   function sendRegister(password) {
+      return new Promise((resolve, reject) => {
+         bot.chat(`/register ${password} ${password}`);
+         console.log(`[Auth] Sent /register command.`);
 
+         bot.once('chat', (username, message) => {
+            console.log(`[ChatLog] <${username}> ${message}`); // Log all chat messages
 
-bot.on('playerCollect', (collector, itemDrop) => {
-  if (collector !== bot.entity) return
+            // Check for various possible responses
+            if (message.includes('successfully registered')) {
+               console.log('[INFO] Registration confirmed.');
+               resolve();
+            } else if (message.includes('already registered')) {
+               console.log('[INFO] Bot was already registered.');
+               resolve(); // Resolve if already registered
+            } else if (message.includes('Invalid command')) {
+               reject(`Registration failed: Invalid command. Message: "${message}"`);
+            } else {
+               reject(`Registration failed: unexpected message "${message}".`);
+            }
+         });
+      });
+   }
 
-  setTimeout(() => {
-    const sword = bot.inventory.items().find(item => item.name.includes('sword'))
-    if (sword) bot.equip(sword, 'hand')
-  }, 150)
-})
+   function sendLogin(password) {
+      return new Promise((resolve, reject) => {
+         bot.chat(`/login ${password}`);
+         console.log(`[Auth] Sent /login command.`);
 
-bot.on('playerCollect', (collector, itemDrop) => {
-  if (collector !== bot.entity) return
+         bot.once('chat', (username, message) => {
+            console.log(`[ChatLog] <${username}> ${message}`); // Log all chat messages
 
-  setTimeout(() => {
-    const shield = bot.inventory.items().find(item => item.name.includes('shield'))
-    if (shield) bot.equip(shield, 'off-hand')
-  }, 250)
-})
+            if (message.includes('successfully logged in')) {
+               console.log('[INFO] Login successful.');
+               resolve();
+            } else if (message.includes('Invalid password')) {
+               reject(`Login failed: Invalid password. Message: "${message}"`);
+            } else if (message.includes('not registered')) {
+               reject(`Login failed: Not registered. Message: "${message}"`);
+            } else {
+               reject(`Login failed: unexpected message "${message}".`);
+            }
+         });
+      });
+   }
 
-let guardPos = null
+   bot.once('spawn', () => {
+      console.log('\x1b[33m[AfkBot] Bot joined the server', '\x1b[0m');
 
-function guardArea (pos) {
-  guardPos = pos.clone()
+      if (config.utils['auto-auth'].enabled) {
+         console.log('[INFO] Started auto-auth module');
 
-  if (!bot.pvp.target) {
-    moveToGuardPos()
-  }
+         const password = config.utils['auto-auth'].password;
+
+         pendingPromise = pendingPromise
+            .then(() => sendRegister(password))
+            .then(() => sendLogin(password))
+            .catch(error => console.error('[ERROR]', error));
+      }
+
+      if (config.utils['chat-messages'].enabled) {
+         console.log('[INFO] Started chat-messages module');
+         const messages = config.utils['chat-messages']['messages'];
+
+         if (config.utils['chat-messages'].repeat) {
+            const delay = config.utils['chat-messages']['repeat-delay'];
+            let i = 0;
+
+            let msg_timer = setInterval(() => {
+               bot.chat(`${messages[i]}`);
+
+               if (i + 1 === messages.length) {
+                  i = 0;
+               } else {
+                  i++;
+               }
+            }, delay * 1000);
+         } else {
+            messages.forEach((msg) => {
+               bot.chat(msg);
+            });
+         }
+      }
+
+      const pos = config.position;
+
+      if (config.position.enabled) {
+         console.log(
+            `\x1b[32m[Afk Bot] Starting to move to target location (${pos.x}, ${pos.y}, ${pos.z})\x1b[0m`
+         );
+         bot.pathfinder.setMovements(defaultMove);
+         bot.pathfinder.setGoal(new GoalBlock(pos.x, pos.y, pos.z));
+      }
+
+      if (config.utils['anti-afk'].enabled) {
+         bot.setControlState('jump', true);
+         if (config.utils['anti-afk'].sneak) {
+            bot.setControlState('sneak', true);
+         }
+      }
+   });
+
+   bot.on('goal_reached', () => {
+      console.log(
+         `\x1b[32m[AfkBot] Bot arrived at the target location. ${bot.entity.position}\x1b[0m`
+      );
+   });
+
+   bot.on('death', () => {
+      console.log(
+         `\x1b[33m[AfkBot] Bot has died and was respawned at ${bot.entity.position}`,
+         '\x1b[0m'
+      );
+   });
+
+   if (config.utils['auto-reconnect']) {
+      bot.on('end', () => {
+         setTimeout(() => {
+            createBot();
+         }, config.utils['auto-recconect-delay']);
+      });
+   }
+
+   bot.on('kicked', (reason) =>
+      console.log(
+         '\x1b[33m',
+         `[AfkBot] Bot was kicked from the server. Reason: \n${reason}`,
+         '\x1b[0m'
+      )
+   );
+
+   bot.on('error', (err) =>
+      console.log(`\x1b[31m[ERROR] ${err.message}`, '\x1b[0m')
+   );
 }
 
-function stopGuarding () {
-  guardPos = null
-  bot.pvp.stop()
-  bot.pathfinder.setGoal(null)
-}
-
-function moveToGuardPos () {
-  const mcData = require('minecraft-data')(bot.version)
-  bot.pathfinder.setMovements(new Movements(bot, mcData))
-  bot.pathfinder.setGoal(new goals.GoalBlock(guardPos.x, guardPos.y, guardPos.z))
-}
-
-bot.on('stoppedAttacking', () => {
-  if (guardPos) {
-    moveToGuardPos()
-  }
-})
-
-bot.on('physicTick', () => {
-  if (bot.pvp.target) return
-  if (bot.pathfinder.isMoving()) return
-
-  const entity = bot.nearestEntity()
-  if (entity) bot.lookAt(entity.position.offset(0, entity.height, 0))
-})
-bot.on('physicTick', () => {
-  if (!guardPos) return
-  const filter = e => e.type === 'mob' && e.position.distanceTo(bot.entity.position) < 16 &&
-                      e.mobType !== 'Armor Stand' 
-  const entity = bot.nearestEntity(filter)
-  if (entity) {
-    bot.pvp.attack(entity)
-  }
-})
-bot.on('chat', (username, message) => {
-  if (message === 'guard') {
-    const player = bot.players[username]
-
-    if (!player) {
-    bot.chat('I will!')
-    guardArea(player.entity.position)
-    }
-
-  }
-  if (message === 'stop') {
-    bot.chat('I will stop!')
-    stopGuarding()
-  }
-})
-
-bot.on('kicked', console.log)
-bot.on('error', console.log)
-bot.on('end', createBot)
-}
-
-createBot()
-
-//// Rembember to sucribe to my channels!
-/// www.youtube.com/c/JinMoriYT
-///www.youtube.com/channel/UC1SR0lQSDfdaSMhmUiaMitg
+createBot();
